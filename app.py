@@ -4,6 +4,9 @@ import tempfile
 import zipfile
 import os
 
+# Import rule engine
+from rule_engine import get_country_rules
+
 # Page config
 st.set_page_config(page_title="Address Point Quality Checker", layout="wide")
 st.title("🌍 Address Point Quality Checker (AI Agent)")
@@ -35,10 +38,19 @@ def load_geodata(uploaded_file):
         st.error("Unsupported file type.")
         return None
 
-# Load geodata and trigger rule engine
+# Main logic
 if uploaded_file and country_code:
-    st.success(f"📌 File uploaded and country set to: `{country_code}`")
-    
+    # Load rules
+    rules = get_country_rules(country_code)
+
+    if rules:
+        st.success(f"📌 File uploaded and country set to: `{rules['country_name']}`")
+        st.caption("✅ Country-specific address rules loaded:")
+        st.json(rules)
+    else:
+        st.error("❌ No rules found for this ISO code. Please check the code or update the rule engine.")
+        st.stop()
+
     with st.spinner("🧠 Reading geospatial data..."):
         gdf = load_geodata(uploaded_file)
         if gdf is not None:
@@ -49,5 +61,6 @@ if uploaded_file and country_code:
             st.info("🔍 Ready to run AI Agent checks with country-specific rules...")
             if st.button("▶️ Run Address Quality Checks"):
                 st.warning("🚧 Checks coming in Step 2. Stay tuned!")
+
 else:
     st.info("📥 Please upload a file and provide country ISO code to proceed.")
