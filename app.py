@@ -3,17 +3,17 @@ import geopandas as gpd
 import tempfile
 import zipfile
 import os
-
 from rule_engine import get_country_rules
 
-# UI setup
+# --- Page Setup ---
 st.set_page_config(page_title="Address Point Quality Checker", layout="wide")
-st.title("🧠 Address Point Quality Checker (AI Agent)")
+st.title("🌍 Address Point Quality Checker (AI Agent)")
 
+# --- File Upload ---
 uploaded_file = st.file_uploader("📂 Upload Address File (.shp.zip or .gpkg)", type=["zip", "gpkg"])
-country_code = st.text_input("🌍 Enter 3-digit ISO Country Code (e.g., IND, ARE, SAU)").upper()
+country_code = st.text_input("🌐 Enter 3-digit ISO Country Code (e.g., ARE, IND, SAU)").upper()
 
-
+# --- Read Geodata ---
 def load_geodata(uploaded_file):
     if uploaded_file.name.endswith(".zip"):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -30,61 +30,74 @@ def load_geodata(uploaded_file):
     elif uploaded_file.name.endswith(".gpkg"):
         return gpd.read_file(uploaded_file)
     else:
-        st.error("Unsupported file format.")
+        st.error("Unsupported file type.")
         return None
 
+# --- Fallback Inference Rule Generator ---
+def infer_country_rules_from_columns(columns, iso_code):
+    inferred = [col.lower() for col in columns]
+    rules = {
+        "country_name": "Unknown",
+        "expected_attributes": [],
+        "postal_code_length": 6,
+        "language_support": ["en"],
+        "accuracy_expectation": "parcel",
+        "mandatory_fields": [],
+        "notes": "Auto-generated rule based on column names"
+    }
 
-def run_quality_checks(gdf, rules):
-    result = []
+    if any("street" in col for col in inferred):
+        rules["expected_attributes"].append("street_name")
+        rules["mandatory_fields"].append("street_name")
 
-    for field in rules["mandatory_fields"]:
-        if field not in gdf.columns:
-            result.append({
-                "Field": field,
-                "Completeness": "nok",
-                "Correctness": "nok",
-                "Reason": "Missing expected attribute in schema"
-            })
-        else:
-            empty_count = gdf[field].isna().sum() + (gdf[field] == "").sum()
-            if empty_count > 0:
-                result.append({
-                    "Field": field,
-                    "Completeness": "nok",
-                    "Correctness": "nok",
-                    "Reason": f"{empty_count} empty/null values"
-                })
-            else:
-                result.append({
-                    "Field": field,
-                    "Completeness": "ok",
-                    "Correctness": "ok",
-                    "Reason": "Field present and populated"
-                })
+    if any("house" in col or "building" in col for col in inferred):
+        rules["expected_attributes"].append("house_number")
+        rules["mandatory_fields"].append("house_number")
 
-    return result
+    if any("postal" in col or "zip" in col for col in inferred):
+        rules["expected_attributes"].append("postal_code")
+        rules["mandatory_fields"].append("postal_code")
 
+    if any("state" in col or "province" in col for col in inferred):
+        rules["expected_attributes"].append("state")
 
+    if any("city" in col or "town" in col for col in inferred):
+        rules["expected_attributes"].append("city")
+
+    return rules
+
+# --- MAIN WORKFLOW ---
 if uploaded_file and country_code:
-    rules = get_country_rules(country_code)
+    st.success(f"📌 File uploaded and country set to: `{country_code}`")
 
-    if rules:
-        st.success(f"✅ Rules loaded for `{rules['country_name']}`")
-        st.json(rules)
-
+    with st.spinner("🧠 Reading geospatial data..."):
         gdf = load_geodata(uploaded_file)
-        if gdf is not None:
-            st.subheader("📌 Sample Data Preview")
-            st.dataframe(gdf.head(10))
 
-            if st.button("🔎 Run Completeness & Correctness Checks"):
-                with st.spinner("Analyzing data..."):
-                    check_results = run_quality_checks(gdf, rules)
+    if gdf is not None:
+        st.subheader("📊 Data Sample Preview")
+        st.dataframe(gdf.head(10))
 
-                st.subheader("✅ Check Results")
-                st.dataframe(check_results)
+        rules = get_country_rules(country_code)
 
-    else:
-        st.error("❌ No rules found for this ISO code.")
+        # If rule not found, try to infer
+        if not rules:
+            st.warning(f"⚠️ No predefined rules for `{country_code}`. Attempting auto-rule generation...")
+            inferred_rules = infer_country_rules_from_columns(gdf.columns, country_code)
+            st.info("🧠 Inferred Rule:")
+            st.json(inferred_rules)
+
+            if st.checkbox("✅ Use inferred rule for validation?"):
+                rules = inferred_rules
+            else:
+                st.stop()
+
+        # Final AI Agent Check Trigger
+        if rules:
+            st.info("🔍 Ready to run address quality checks...")
+            if st.button("▶️ Run Address Quality Checks"):
+                st.success("🚀 Running with the following rules:")
+                st.json(rules)
+                st.warning("🚧 Quality check logic will be added in next step.")
+
 else:
-    st.info("📥 Please upload a file and provide ISO code to begin.")
+    st.info("📥 Please upload a file and enter a valid 3-digit ISO country code.")
