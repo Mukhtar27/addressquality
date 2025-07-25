@@ -33,7 +33,7 @@ def load_geodata(uploaded_file):
         st.error("Unsupported file type.")
         return None
 
-# --- Fallback Inference Rule Generator ---
+# --- Fallback Rule Inference ---
 def infer_country_rules_from_columns(columns, iso_code):
     inferred = [col.lower() for col in columns]
     rules = {
@@ -79,7 +79,7 @@ if uploaded_file and country_code:
 
         rules = get_country_rules(country_code)
 
-        # If rule not found, try to infer
+        # If no static rules, attempt to infer
         if not rules:
             st.warning(f"⚠️ No predefined rules for `{country_code}`. Attempting auto-rule generation...")
             inferred_rules = infer_country_rules_from_columns(gdf.columns, country_code)
@@ -91,13 +91,81 @@ if uploaded_file and country_code:
             else:
                 st.stop()
 
-        # Final AI Agent Check Trigger
+        # --- AI Agent Validation Logic ---
         if rules:
             st.info("🔍 Ready to run address quality checks...")
             if st.button("▶️ Run Address Quality Checks"):
                 st.success("🚀 Running with the following rules:")
                 st.json(rules)
-                st.warning("🚧 Quality check logic will be added in next step.")
+
+                results = []
+                gdf["Remark"] = ""  # Init empty remark field
+
+                # Mandatory Fields Present in Schema
+                mandatory_fields = rules.get("mandatory_fields", [])
+                missing_fields = [field for field in mandatory_fields if field not in gdf.columns.str.lower()]
+                if missing_fields:
+                    results.append(f"❌ Missing mandatory fields: {', '.join(missing_fields)}")
+                else:
+                    results.append("✅ All mandatory fields are present.")
+
+                # Row-level missing values in mandatory fields
+                for field in mandatory_fields:
+                    matches = [col for col in gdf.columns if col.lower() == field]
+                    if matches:
+                        col = matches[0]
+                        missing_mask = gdf[col].isna() | (gdf[col].astype(str).str.strip() == "")
+                        gdf.loc[missing_mask, "Remark"] += f"{col} is missing|"
+                        results.append(f"⚠️ {missing_mask.sum()} missing values in `{col}`.")
+
+                # Postal Code Length Check
+                if "postal_code" in [f.lower() for f in rules.get("expected_attributes", [])]:
+                    postal_cols = [col for col in gdf.columns if "postal" in col.lower() or "zip" in col.lower()]
+                    if postal_cols:
+                        postal_col = postal_cols[0]
+                        gdf[postal_col] = gdf[postal_col].astype(str)
+                        wrong_length_mask = ~gdf[postal_col].str.len().eq(rules["postal_code_length"])
+                        gdf.loc[wrong_length_mask, "Remark"] += f"{postal_col} wrong length|"
+                        results.append(f"📮 Postal code length errors: {wrong_length_mask.sum()} rows (expected {rules['postal_code_length']} digits)")
+                    else:
+                        results.append("⚠️ No postal code column found for length check.")
+
+                # Geometry checks
+                null_geom_mask = gdf.geometry.isnull()
+                gdf.loc[null_geom_mask, "Remark"] += "Null geometry|"
+                if null_geom_mask.any():
+                    results.append(f"❌ {null_geom_mask.sum()} null geometries found.")
+                else:
+                    results.append("✅ No null geometries.")
+
+                invalid_geom_mask = ~gdf.is_valid
+                gdf.loc[invalid_geom_mask, "Remark"] += "Invalid geometry|"
+                if invalid_geom_mask.any():
+                    results.append(f"❌ {invalid_geom_mask.sum()} invalid geometries found.")
+                else:
+                    results.append("✅ All geometries are valid.")
+
+                # CRS check
+                crs = gdf.crs
+                if crs:
+                    results.append(f"🧭 CRS detected: `{crs}`")
+                else:
+                    results.append("⚠️ CRS not set in the data.")
+
+                # Final clean-up of trailing pipes
+                gdf["Remark"] = gdf["Remark"].str.rstrip("|")
+
+                # --- Display Results ---
+                st.subheader("🧪 Quality Check Summary")
+                for res in results:
+                    st.write(res)
+
+                error_rows = gdf[gdf["Remark"] != ""]
+                if not error_rows.empty:
+                    st.subheader(f"🚨 {len(error_rows)} Rows with Issues")
+                    st.dataframe(error_rows)
+                else:
+                    st.success("🎉 No row-level issues found!")
 
 else:
     st.info("📥 Please upload a file and enter a valid 3-digit ISO country code.")
