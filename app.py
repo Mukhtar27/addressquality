@@ -4,20 +4,16 @@ import tempfile
 import zipfile
 import os
 
-# Import rule engine
 from rule_engine import get_country_rules
 
-# Page config
+# UI setup
 st.set_page_config(page_title="Address Point Quality Checker", layout="wide")
-st.title("🌍 Address Point Quality Checker (AI Agent)")
+st.title("🧠 Address Point Quality Checker (AI Agent)")
 
-# File upload
 uploaded_file = st.file_uploader("📂 Upload Address File (.shp.zip or .gpkg)", type=["zip", "gpkg"])
+country_code = st.text_input("🌍 Enter 3-digit ISO Country Code (e.g., IND, ARE, SAU)").upper()
 
-# Country input
-country_code = st.text_input("🌐 Enter 3-digit ISO Country Code (e.g., ARE, IND, SAU)").upper()
 
-# Function to read uploaded geodata
 def load_geodata(uploaded_file):
     if uploaded_file.name.endswith(".zip"):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -30,37 +26,65 @@ def load_geodata(uploaded_file):
                 if not shp_files:
                     st.error("No .shp file found inside zip.")
                     return None
-                shp_path = os.path.join(tmpdir, shp_files[0])
-                return gpd.read_file(shp_path)
+                return gpd.read_file(os.path.join(tmpdir, shp_files[0]))
     elif uploaded_file.name.endswith(".gpkg"):
         return gpd.read_file(uploaded_file)
     else:
-        st.error("Unsupported file type.")
+        st.error("Unsupported file format.")
         return None
 
-# Main logic
+
+def run_quality_checks(gdf, rules):
+    result = []
+
+    for field in rules["mandatory_fields"]:
+        if field not in gdf.columns:
+            result.append({
+                "Field": field,
+                "Completeness": "nok",
+                "Correctness": "nok",
+                "Reason": "Missing expected attribute in schema"
+            })
+        else:
+            empty_count = gdf[field].isna().sum() + (gdf[field] == "").sum()
+            if empty_count > 0:
+                result.append({
+                    "Field": field,
+                    "Completeness": "nok",
+                    "Correctness": "nok",
+                    "Reason": f"{empty_count} empty/null values"
+                })
+            else:
+                result.append({
+                    "Field": field,
+                    "Completeness": "ok",
+                    "Correctness": "ok",
+                    "Reason": "Field present and populated"
+                })
+
+    return result
+
+
 if uploaded_file and country_code:
-    # Load rules
     rules = get_country_rules(country_code)
 
     if rules:
-        st.success(f"📌 File uploaded and country set to: `{rules['country_name']}`")
-        st.caption("✅ Country-specific address rules loaded:")
+        st.success(f"✅ Rules loaded for `{rules['country_name']}`")
         st.json(rules)
-    else:
-        st.error("❌ No rules found for this ISO code. Please check the code or update the rule engine.")
-        st.stop()
 
-    with st.spinner("🧠 Reading geospatial data..."):
         gdf = load_geodata(uploaded_file)
         if gdf is not None:
-            st.subheader("📊 Data Sample Preview")
+            st.subheader("📌 Sample Data Preview")
             st.dataframe(gdf.head(10))
 
-            # Placeholder for AI Agent
-            st.info("🔍 Ready to run AI Agent checks with country-specific rules...")
-            if st.button("▶️ Run Address Quality Checks"):
-                st.warning("🚧 Checks coming in Step 2. Stay tuned!")
+            if st.button("🔎 Run Completeness & Correctness Checks"):
+                with st.spinner("Analyzing data..."):
+                    check_results = run_quality_checks(gdf, rules)
 
+                st.subheader("✅ Check Results")
+                st.dataframe(check_results)
+
+    else:
+        st.error("❌ No rules found for this ISO code.")
 else:
-    st.info("📥 Please upload a file and provide country ISO code to proceed.")
+    st.info("📥 Please upload a file and provide ISO code to begin.")
