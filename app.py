@@ -1,147 +1,116 @@
-# Install dependencies (commented out to avoid reinstallation)
-# !pip install --quiet streamlit geopandas ollama
+# app.py
 
 import streamlit as st
 import geopandas as gpd
 import tempfile
-import zipfile
 import os
-import re
-import ollama
+import json
+import pandas as pd
 from rule_engine import get_country_rules
+from difflib import get_close_matches
+import ollama
 
-# --- Page Setup ---
-st.set_page_config(page_title="Address Point Quality Checker (AI Agent)", layout="wide")
-st.title("🌍 Address Point Quality Checker (AI Agent)")
+st.set_page_config(page_title="Address Point Quality Checker", layout="wide")
 
-# --- File Upload ---
-uploaded_file = st.file_uploader("📂 Upload Address File (.shp.zip or .gpkg)", type=["zip", "gpkg"])
-country_code = st.text_input("🌐 Enter 3-digit ISO Country Code (e.g., ARE, IND, SAU)").upper()
+st.title("📍 Address Point Data Quality AI Agent")
 
-# --- Read Geodata ---
-def load_geodata(uploaded_file):
-    if uploaded_file.name.endswith(".zip"):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            zip_path = os.path.join(tmpdir, "data.zip")
-            with open(zip_path, "wb") as f:
-                f.write(uploaded_file.read())
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(tmpdir)
-                shp_files = [f for f in os.listdir(tmpdir) if f.endswith(".shp")]
-                if not shp_files:
-                    st.error("No .shp file found inside zip.")
-                    return None
-                return gpd.read_file(os.path.join(tmpdir, shp_files[0]))
-    elif uploaded_file.name.endswith(".gpkg"):
-        return gpd.read_file(uploaded_file)
-    else:
-        st.error("Unsupported file type.")
-        return None
+uploaded_file = st.file_uploader("Upload address point file (.shp or .gpkg)", type=["shp", "gpkg"])
+iso_code = st.text_input("Enter 3-digit ISO country code (e.g., IND, ARE, SAU):").upper()
 
-# --- Fallback Inference Rule Generator ---
-def infer_country_rules_from_columns(columns, iso_code):
-    inferred = [col.lower() for col in columns]
-    rules = {
-        "country_name": "Unknown",
-        "expected_attributes": [],
-        "postal_code_length": 6,
-        "language_support": ["en"],
-        "accuracy_expectation": "parcel",
-        "mandatory_fields": [],
-        "notes": "Auto-generated rule based on column names"
-    }
+if uploaded_file and iso_code:
+    # Save uploaded file to a temporary directory
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = os.path.join(tmpdir, uploaded_file.name)
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
 
-    if any("street" in col for col in inferred):
-        rules["expected_attributes"].append("street_name")
-        rules["mandatory_fields"].append("street_name")
+        # Load data
+        if uploaded_file.name.endswith(".shp"):
+            gdf = gpd.read_file(file_path)
+        else:
+            gdf = gpd.read_file(file_path)
 
-    if any("house" in col or "building" in col for col in inferred):
-        rules["expected_attributes"].append("house_number")
-        rules["mandatory_fields"].append("house_number")
+        st.success("✅ File successfully loaded.")
+        st.write(f"CRS detected: {gdf.crs}")
 
-    if any("postal" in col or "zip" in col for col in inferred):
-        rules["expected_attributes"].append("postal_code")
-        rules["mandatory_fields"].append("postal_code")
+        rules = get_country_rules(iso_code)
 
-    if any("state" in col or "province" in col for col in inferred):
-        rules["expected_attributes"].append("state")
-
-    if any("city" in col or "town" in col for col in inferred):
-        rules["expected_attributes"].append("city")
-
-    return rules
-
-# --- LLM Helpers ---
-def analyze_value_anomalies(row_data):
-    prompt = (
-        "You are a data quality assistant. Given address data values, identify spelling errors or strange entries. "
-        "Only report anomalies. Do NOT suggest corrections. "
-        "Format response as: 'ColumnName: issue' (multiple issues separated by '|').\n\n"
-        f"Example row:\n{row_data}\n\nAnomalies:"
-    )
-    response = ollama.chat(model="llama3", messages=[{"role": "user", "content": prompt}])
-    return response['message']['content'].strip()
-
-# --- MAIN WORKFLOW ---
-if uploaded_file and country_code:
-    st.success(f"📌 File uploaded and country set to: `{country_code}`")
-
-    with st.spinner("🧠 Reading geospatial data..."):
-        gdf = load_geodata(uploaded_file)
-
-    if gdf is not None:
-        st.subheader("📊 Data Sample Preview")
-        st.dataframe(gdf.head(10))
-
-        rules = get_country_rules(country_code)
-
-        # If rule not found, try to infer
         if not rules:
-            st.warning(f"⚠️ No predefined rules for `{country_code}`. Attempting auto-rule generation...")
-            inferred_rules = infer_country_rules_from_columns(gdf.columns, country_code)
-            st.info("🧠 Inferred Rule:")
-            st.json(inferred_rules)
+            st.error("❌ No rules found for the given ISO code.")
+        else:
+            st.info(f"🧠 Loaded rules for **{rules['country_name']}**")
+            expected_attributes = rules["expected_attributes"]
+            mandatory_fields = rules["mandatory_fields"]
 
-            if st.checkbox("✅ Use inferred rule for validation?"):
-                rules = inferred_rules
+            # ---------- LLM-BASED COLUMN MAPPING ----------
+            def get_column_mapping_with_llm(expected, actual):
+                prompt = f"""
+You are an expert in address data validation.
+
+Map the following expected address fields to the actual column names found in a geospatial dataset. The mapping should only include best guesses if the actual name closely resembles the expected one.
+
+Respond ONLY with a JSON dictionary.
+
+Expected: {expected}
+Actual: {actual}
+"""
+                response = ollama.chat(
+                    model="llama3",
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                try:
+                    mapping = json.loads(response['message']['content'])
+                    return mapping
+                except Exception as e:
+                    st.error("❌ LLM failed to infer column mappings.")
+                    return {}
+
+            actual_columns = list(gdf.columns)
+            mapping = get_column_mapping_with_llm(expected_attributes, actual_columns)
+            st.write("🧩 Inferred Column Mapping (without renaming):")
+            st.json(mapping)
+
+            # Quality Checks
+            quality_issues = []
+            gdf["Remark"] = ""
+
+            for idx, row in gdf.iterrows():
+                row_remarks = []
+
+                # Check for missing mandatory fields (based on mapping)
+                for expected_field in mandatory_fields:
+                    actual_col = mapping.get(expected_field)
+                    if actual_col and pd.isna(row.get(actual_col, None)):
+                        row_remarks.append(f"Missing `{expected_field}`")
+
+                # Optional: Spelling anomaly check (naive approach using basic heuristics)
+                for expected_field in expected_attributes:
+                    actual_col = mapping.get(expected_field)
+                    if actual_col in gdf.columns and isinstance(row[actual_col], str):
+                        val = row[actual_col]
+                        if len(val) > 3 and not val.replace(" ", "").isalpha():
+                            row_remarks.append(f"Suspicious content in `{expected_field}`")
+
+                gdf.at[idx, "Remark"] = " | ".join(row_remarks)
+
+            # Final summary
+            st.subheader("🧪 Quality Check Summary")
+            missing_mandatory = [f for f in mandatory_fields if f not in mapping or mapping[f] not in gdf.columns]
+            if missing_mandatory:
+                st.error(f"❌ Missing mapped mandatory fields: {', '.join(missing_mandatory)}")
             else:
-                st.stop()
+                st.success("✅ All mapped mandatory fields present.")
 
-        # Final AI Agent Check Trigger
-        if rules:
-            st.info("🔍 Ready to run address quality checks...")
-            if st.button("▶️ Run Address Quality Checks"):
-                st.success("🚀 Running with the following rules:")
-                st.json(rules)
+            if gdf.geometry.isna().any():
+                st.error("❌ Null geometries detected.")
+            else:
+                st.success("✅ No null geometries.")
 
-                # Begin quality checks
-                remarks = []
-                mandatory_fields = rules["mandatory_fields"]
-                expected_attributes = rules["expected_attributes"]
+            if not gdf.is_valid.all():
+                st.warning("⚠️ Some geometries are invalid.")
+            else:
+                st.success("✅ All geometries are valid.")
 
-                for _, row in gdf.iterrows():
-                    row_remark = []
-
-                    # Mandatory field check
-                    for field in mandatory_fields:
-                        matched = next((col for col in gdf.columns if re.fullmatch(field, col, flags=re.IGNORECASE)), None)
-                        if matched and pd.isna(row[matched]):
-                            row_remark.append(f"{field}: missing")
-
-                    # LLM value anomaly check
-                    subset = row[expected_attributes].dropna().astype(str).to_dict()
-                    if subset:
-                        issues = analyze_value_anomalies(subset)
-                        if issues and issues.lower() != "none":
-                            row_remark.append(issues)
-
-                    remarks.append(" | ".join(row_remark) if row_remark else "")
-
-                gdf["Remark"] = remarks
-
-                st.subheader("✅ Final Output Sample")
-                st.dataframe(gdf.head(10))
-                st.download_button("📥 Download Checked File (GeoJSON)", gdf.to_json(), file_name="checked_output.geojson", mime="application/json")
-
-else:
-    st.info("📥 Please upload a file and enter a valid 3-digit ISO country code.")
+            # Show preview
+            st.subheader("🔍 Data Preview with Remarks")
+            st.dataframe(gdf[[*gdf.columns.difference(['geometry']), 'Remark']].head(50))
