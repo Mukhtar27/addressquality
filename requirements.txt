@@ -14,3 +14,5 @@ pandas
 # For LLM inference (if using Ollama + LangChain + local LLM)
 langchain
 openai
+ollama
+
